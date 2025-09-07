@@ -16,4 +16,4 @@ dependencies = [
 ]
 
 [project.scripts]
-nano-code = "nano_code.cli:main"
+nano-code = "nano_code.cli:app"

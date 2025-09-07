@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from collections.abc import Callable
 import subprocess
 from jinja2 import Template
-from openai_client import OpenAIClient
+from nano_code.openai_client import OpenAIClient
 
 class NonTerminatingException(Exception):
     """Raised for conditions that can be handled by the agent."""

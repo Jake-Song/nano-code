@@ -15,7 +15,7 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 from rich.rule import Rule
 
-from agent import AgentConfig, CodingAgent, LimitsExceeded, NonTerminatingException, Submitted
+from nano_code.agent import AgentConfig, CodingAgent, LimitsExceeded, NonTerminatingException, Submitted
 
 console = Console(highlight=False)
 prompt_session = PromptSession(history=FileHistory("chat_history.txt"))

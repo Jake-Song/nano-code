@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 import traceback
 from rich.console import Console
-from chat_agent import ChatAgent
-from local import LocalEnvironment
+from nano_code.chat_agent import ChatAgent
+from nano_code.local import LocalEnvironment
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import PromptSession
@@ -23,7 +23,8 @@ def main(
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=True),
 ) -> Any:
     
-    config = yaml.safe_load(Path("nano_code/default.yaml").read_text())
+    config_path = Path(__file__).parent / "default.yaml"
+    config = yaml.safe_load(config_path.read_text())
 
     if not task:
         console.print("[bold yellow]What do you want to do?")
