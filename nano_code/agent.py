@@ -1,328 +1,165 @@
 """Core coding agent logic."""
 
-import ast
+import os
+import platform
 import re
-from pathlib import Path
-from typing import Dict, List, Any, Optional
-from .openai_client import OpenAIClient
+from typing import Any
+from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+import subprocess
+from jinja2 import Template
+from openai_client import OpenAIClient
 
+class NonTerminatingException(Exception):
+    """Raised for conditions that can be handled by the agent."""
+
+
+class FormatError(NonTerminatingException):
+    """Raised when the LM's output is not in the expected format."""
+
+
+class ExecutionTimeoutError(NonTerminatingException):
+    """Raised when the action execution timed out."""
+
+
+class TerminatingException(Exception):
+    """Raised for conditions that terminate the agent."""
+
+
+class Submitted(TerminatingException):
+    """Raised when the LM declares that the agent has finished its task."""
+
+
+class LimitsExceeded(TerminatingException):
+    """Raised when the agent has reached its cost or step limit."""
+
+@dataclass
+class AgentConfig:
+    # The default settings are the bare minimum to run the agent. Take a look at the config files for improved settings.
+    system_template: str = "You are a helpful assistant that can do anything."
+    instance_template: str = (
+        "Your task: {{task}}. Please reply with a single shell command in triple backticks. "
+        "To finish, the first line of the output of the shell command must be 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'."
+    )
+    timeout_template: str = (
+        "The last command <command>{{action['action']}}</command> timed out and has been killed.\n"
+        "The output of the command was:\n <output>\n{{output}}\n</output>\n"
+        "Please try another command and make sure to avoid those requiring interactive input."
+    )
+    format_error_template: str = "Please always provide EXACTLY ONE action in triple backticks."
+    action_observation_template: str = "Observation: {{output}}"
+    step_limit: int = 0
+    cost_limit: float = 3.0
+
+@dataclass
+class LocalEnvironmentConfig:
+    cwd: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    timeout: int = 30
+
+class LocalEnvironment:
+    def __init__(self, *, config_class: type = LocalEnvironmentConfig, **kwargs):
+        """This class executes bash commands directly on the local machine."""
+        self.config = config_class(**kwargs)
+
+    def execute(self, command: str, cwd: str = ""):
+        """Execute a command in the local environment and return the result as a dict."""
+        cwd = cwd or self.config.cwd or os.getcwd()
+        result = subprocess.run(
+            command,
+            shell=True,
+            text=True,
+            cwd=cwd,
+            env=os.environ | self.config.env,
+            timeout=self.config.timeout,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        return {"output": result.stdout, "returncode": result.returncode}
+
+    def get_template_vars(self) -> dict[str, Any]:
+        return asdict(self.config) | platform.uname()._asdict() | os.environ
 
 class CodingAgent:
     """A simple coding agent for analyzing and generating code."""
     
-    def __init__(self, use_openai: bool = True, api_key: Optional[str] = None):
-        self.use_openai = use_openai
-        self.openai_client = None
-        
-        if use_openai:
-            try:
-                self.openai_client = OpenAIClient(api_key)
-            except ValueError as e:
-                print(f"Warning: {e}")
-                print("Falling back to basic mode without OpenAI.")
-                self.use_openai = False
-        
-        self.supported_languages = {
-            'python': self._analyze_python,
-            'py': self._analyze_python,
-            'javascript': self._analyze_generic,
-            'js': self._analyze_generic,
-            'java': self._analyze_generic,
-            'cpp': self._analyze_generic,
-            'c': self._analyze_generic,
-        }
-        
-        self.code_templates = {
-            'python': {
-                'function': 'def {name}({params}):\n    """{description}"""\n    pass\n',
-                'class': 'class {name}:\n    """{description}"""\n    \n    def __init__(self):\n        pass\n',
-                'script': '#!/usr/bin/env python3\n"""{description}"""\n\ndef main():\n    pass\n\nif __name__ == "__main__":\n    main()\n'
-            },
-            'javascript': {
-                'function': 'function {name}({params}) {{\n    // {description}\n    \n}}\n',
-                'class': 'class {name} {{\n    // {description}\n    constructor() {{\n        \n    }}\n}}\n',
-                'script': '// {description}\n\nfunction main() {{\n    \n}}\n\nmain();\n'
-            }
-        }
-    
-    def analyze_file(self, file_path: str) -> str:
-        """Analyze a code file and provide insights."""
-        path = Path(file_path)
-        
-        if not path.exists():
-            return f"File {file_path} does not exist."
-        
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            return f"Cannot read {file_path}: not a text file or encoding issue."
-        
-        # Use OpenAI for enhanced analysis if available
-        if self.use_openai and self.openai_client:
-            try:
-                ai_analysis = self.openai_client.analyze_code(content, file_path)
-                return ai_analysis
-            except Exception as e:
-                print(f"Warning: {e}")
-                print("Falling back to basic analysis.")
-                # Fall through to basic analysis
-        
-        # Fall back to basic analysis
-        extension = path.suffix.lower().lstrip('.')
-        analyzer = self.supported_languages.get(extension, self._analyze_generic)
-        
-        analysis = analyzer(content, file_path)
-        
-        return self._format_analysis(analysis, file_path)
-    
-    def _analyze_python(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Analyze Python code specifically."""
-        analysis = {
-            'language': 'Python',
-            'lines': len(content.splitlines()),
-            'functions': [],
-            'classes': [],
-            'imports': [],
-            'complexity': 'low',
-            'issues': []
-        }
-        
-        try:
-            tree = ast.parse(content)
-            
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    analysis['functions'].append({
-                        'name': node.name,
-                        'line': node.lineno,
-                        'args': len(node.args.args)
-                    })
-                elif isinstance(node, ast.ClassDef):
-                    analysis['classes'].append({
-                        'name': node.name,
-                        'line': node.lineno
-                    })
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        analysis['imports'].append(alias.name)
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        analysis['imports'].append(node.module)
-            
-            # Simple complexity heuristic
-            if len(analysis['functions']) > 10 or len(analysis['classes']) > 5:
-                analysis['complexity'] = 'high'
-            elif len(analysis['functions']) > 3 or len(analysis['classes']) > 1:
-                analysis['complexity'] = 'medium'
-                
-        except SyntaxError as e:
-            analysis['issues'].append(f"Syntax error: {e}")
-        
-        return analysis
-    
-    def _analyze_generic(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Generic code analysis for unsupported languages."""
-        lines = content.splitlines()
-        
-        analysis = {
-            'language': 'Generic',
-            'lines': len(lines),
-            'functions': [],
-            'classes': [],
-            'complexity': 'unknown',
-            'issues': []
-        }
-        
-        # Simple pattern matching for common constructs
-        function_patterns = [
-            r'function\s+(\w+)',  # JavaScript
-            r'def\s+(\w+)',       # Python
-            r'(\w+)\s*\([^)]*\)\s*{',  # C-style
-        ]
-        
-        class_patterns = [
-            r'class\s+(\w+)',
-            r'struct\s+(\w+)',
-        ]
-        
-        for i, line in enumerate(lines, 1):
-            # Look for functions
-            for pattern in function_patterns:
-                matches = re.findall(pattern, line)
-                for match in matches:
-                    analysis['functions'].append({
-                        'name': match,
-                        'line': i
-                    })
-            
-            # Look for classes
-            for pattern in class_patterns:
-                matches = re.findall(pattern, line)
-                for match in matches:
-                    analysis['classes'].append({
-                        'name': match,
-                        'line': i
-                    })
-        
-        return analysis
-    
-    def _format_analysis(self, analysis: Dict[str, Any], file_path: str) -> str:
-        """Format analysis results into readable text."""
-        result = []
-        result.append(f"📁 File: {file_path}")
-        result.append(f"🔤 Language: {analysis['language']}")
-        result.append(f"📏 Lines: {analysis['lines']}")
-        
-        if analysis['functions']:
-            result.append(f"\n🔧 Functions ({len(analysis['functions'])}):")
-            for func in analysis['functions'][:5]:  # Show first 5
-                args_info = f" ({func['args']} args)" if 'args' in func else ""
-                result.append(f"  • {func['name']} (line {func['line']}){args_info}")
-            if len(analysis['functions']) > 5:
-                result.append(f"  ... and {len(analysis['functions']) - 5} more")
-        
-        if analysis['classes']:
-            result.append(f"\n🏗️  Classes ({len(analysis['classes'])}):")
-            for cls in analysis['classes'][:5]:  # Show first 5
-                result.append(f"  • {cls['name']} (line {cls['line']})")
-            if len(analysis['classes']) > 5:
-                result.append(f"  ... and {len(analysis['classes']) - 5} more")
-        
-        if analysis.get('imports'):
-            result.append(f"\n📦 Imports ({len(analysis['imports'])}):")
-            for imp in analysis['imports'][:5]:
-                result.append(f"  • {imp}")
-            if len(analysis['imports']) > 5:
-                result.append(f"  ... and {len(analysis['imports']) - 5} more")
-        
-        if analysis['complexity'] != 'unknown':
-            result.append(f"\n🔍 Complexity: {analysis['complexity']}")
-        
-        if analysis['issues']:
-            result.append(f"\n⚠️  Issues:")
-            for issue in analysis['issues']:
-                result.append(f"  • {issue}")
-        
-        return '\n'.join(result)
-    
-    def generate_code(self, description: str, language: str = 'python') -> str:
-        """Generate code based on description and language."""
-        # Use OpenAI for code generation if available
-        if self.use_openai and self.openai_client:
-            try:
-                return self.openai_client.generate_code(description, language)
-            except Exception as e:
-                print(f"Warning: {e}")
-                print("Falling back to template-based generation.")
-                # Fall through to template-based generation
-        
-        # Fall back to template-based generation
-        language = language.lower()
-        
-        if language not in self.code_templates:
-            return f"Sorry, I don't support code generation for {language} yet. Supported: {', '.join(self.code_templates.keys())}"
-        
-        templates = self.code_templates[language]
-        
-        # Simple heuristics to determine code type
-        description_lower = description.lower()
-        
-        if any(word in description_lower for word in ['class', 'object', 'struct']):
-            template_type = 'class'
-            name = self._extract_name(description, 'class')
-        elif any(word in description_lower for word in ['function', 'method', 'def']):
-            template_type = 'function'
-            name = self._extract_name(description, 'function')
-        else:
-            template_type = 'script'
-            name = 'main'
-        
-        template = templates[template_type]
-        params = self._extract_parameters(description)
-        
-        return template.format(
-            name=name,
-            description=description,
-            params=params
-        )
-    
-    def _extract_name(self, description: str, code_type: str) -> str:
-        """Extract a reasonable name from description."""
-        words = re.findall(r'\b\w+\b', description.lower())
-        
-        # Filter out common words
-        stop_words = {'a', 'an', 'the', 'to', 'for', 'of', 'in', 'on', 'at', 'by', 'with'}
-        meaningful_words = [w for w in words if w not in stop_words and len(w) > 2]
-        
-        if meaningful_words:
-            if code_type == 'class':
-                return ''.join(word.capitalize() for word in meaningful_words[:2])
-            else:
-                return '_'.join(meaningful_words[:3])
-        
-        return f'my_{code_type}'
-    
-    def _extract_parameters(self, description: str) -> str:
-        """Extract parameter suggestions from description."""
-        # Simple parameter detection
-        if 'parameter' in description.lower() or 'argument' in description.lower():
-            return 'param1, param2'
-        elif any(word in description.lower() for word in ['input', 'value', 'data']):
-            return 'input_data'
-        return ''
-    
-    def chat(self, user_input: str) -> str:
-        """Handle chat interactions."""
-        original_input = user_input.strip()
-        user_input_lower = user_input.strip().lower()
-        
-        # Use OpenAI for intelligent chat if available
-        if self.use_openai and self.openai_client:
-            # Check for specific commands first
-            if user_input_lower.startswith('analyze '):
-                file_path = original_input[8:].strip()
-                return self.analyze_file(file_path)
-            elif user_input_lower.startswith('generate '):
-                description = original_input[9:].strip()
-                return self.generate_code(description)
-            elif any(word in user_input_lower for word in ['help', 'commands']):
-                return self._get_help()
-            else:
-                # Use OpenAI for general chat
-                try:
-                    return self.openai_client.chat_response(original_input)
-                except Exception as e:
-                    print(f"Warning: {e}")
-                    print("Falling back to basic response.")
-                    # Fall through to basic chat handling
-        
-        # Fall back to simple command recognition
-        if user_input_lower.startswith('analyze '):
-            file_path = original_input[8:].strip()
-            return self.analyze_file(file_path)
-        
-        elif user_input_lower.startswith('generate '):
-            description = original_input[9:].strip()
-            return self.generate_code(description)
-        
-        elif any(word in user_input_lower for word in ['help', 'commands']):
-            return self._get_help()
-        
-        elif any(word in user_input_lower for word in ['hello', 'hi', 'hey']):
-            return "Hello! I'm your coding agent. I can analyze code files and generate code. Try 'help' for commands."
-        
-        else:
-            # Default: treat as code generation request
-            return f"I'll help you with that! Here's some code:\n\n{self.generate_code(original_input)}"
-    
-    def _get_help(self) -> str:
-        """Return help text."""
-        return """
-Available commands:
-• analyze <file_path> - Analyze a code file
-• generate <description> - Generate code from description
-• help - Show this help message
+    def __init__(self, env: LocalEnvironment, *, config_class: Callable = AgentConfig, **kwargs):
+        self.config = config_class(**kwargs)
+        self.messages: list[dict] = []
+        self.env = env
+        self.model = OpenAIClient()
+        self.extra_template_vars = {}
 
-You can also just describe what you want, and I'll try to generate code for you!
-        """.strip()
+    def render_template(self, template: str, **kwargs) -> str:
+        template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
+        return Template(template).render(**kwargs, **template_vars, **self.extra_template_vars)
+
+    def add_message(self, role: str, content: str, **kwargs):
+        self.messages.append({"role": role, "content": content, **kwargs})
+
+    def run(self, task: str, **kwargs) -> tuple[str, str]:
+        """Run step() until agent is finished. Return exit status & message"""
+        self.extra_template_vars |= {"task": task, **kwargs}
+        self.messages = []
+        self.add_message("system", self.render_template(self.config.system_template))
+        self.add_message("user", self.render_template(self.config.instance_template))
+        while True:
+            try:
+                self.step()
+            except NonTerminatingException as e:
+                self.add_message("user", str(e))
+            except TerminatingException as e:
+                self.add_message("user", str(e))
+                return type(e).__name__, str(e)
+
+    def step(self) -> dict:
+        """Query the LM, execute the action, return the observation."""
+        return self.get_observation(self.query())
+
+    def query(self) -> dict:
+        """Query the model and return the response."""
+        if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+            raise LimitsExceeded()
+        response = self.model.query(self.messages)
+        self.add_message("assistant", **response)
+        
+        return response
+
+    def get_observation(self, response: dict) -> dict:
+        """Execute the action and return the observation."""
+        output = self.execute_action(self.parse_action(response))
+        observation = self.render_template(self.config.action_observation_template, output=output)
+        self.add_message("user", observation)
+        
+        return output
+
+    def parse_action(self, response: dict) -> dict:
+        """Parse the action from the message. Returns the action."""
+        actions = re.findall(r"```bash\n(.*?)\n```", response["content"], re.DOTALL)
+        
+        if len(actions) == 1:
+            return {"action": actions[0].strip(), **response}
+        raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
+
+    def execute_action(self, action: dict) -> dict:
+        try:
+            output = self.env.execute(action["action"])
+            
+        except subprocess.TimeoutExpired as e:
+            output = e.output.decode("utf-8", errors="replace") if e.output else ""
+            raise ExecutionTimeoutError(
+                self.render_template(self.config.timeout_template, action=action, output=output)
+            )
+        except TimeoutError:
+            raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=action, output=""))
+        self.has_finished(output)
+        return output
+
+    def has_finished(self, output: dict[str, str]):
+        """Raises Submitted exception with final output if the agent has finished its task."""
+        lines = output.get("output", "").lstrip().splitlines(keepends=True)
+        
+        if lines and lines[0].strip() in ["MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]:
+            raise Submitted("".join(lines[1:]))

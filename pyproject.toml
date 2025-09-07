@@ -9,6 +9,10 @@ dependencies = [
     "rich>=13.0.0",
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
+    "jinja2>=3.1.6",
+    "pyyaml>=6.0.2",
+    "typer>=0.17.4",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.scripts]

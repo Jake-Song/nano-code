@@ -1,19 +1,20 @@
 """OpenAI client configuration and utilities."""
 
 import os
-from typing import Optional
+from typing import Optional, Any
 from openai import OpenAI
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv(override=True)
 
-
 class OpenAIClient:
     """Wrapper for OpenAI API client."""
-    
+  
     def __init__(self, api_key: Optional[str] = None):
         """Initialize OpenAI client with API key."""
+        self.n_calls = 0
+        self.cost = 0.0
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
         if not self.api_key:
             raise ValueError(
@@ -22,82 +23,46 @@ class OpenAIClient:
             )
         
         self.client = OpenAI(api_key=self.api_key)
-        self.model = "gpt-5-mini"  # Default model
+        self.model = "gpt-5"  # Default model
     
-    def chat_completion(self, messages: list, max_tokens: int = 1000) -> str:
-        """Get chat completion from OpenAI."""
+    def _query(self, messages: list[dict[str, str]], max_tokens: int = 1000, **kwargs):
         try:
-            response = self.client.chat.completions.create(
+            return self.client.responses.create(
                 model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.7
+                input=messages,
+                max_output_tokens=max_tokens,
             )
-            return response.choices[0].message.content
         except Exception as e:
-            raise Exception(f"OpenAI API error: {e}")
+            raise Exception(f"OpenAI API error: {e}")   
+       
+    def cost_calculator(self, response: dict):
+        input_token = response.usage.input_tokens
+        output_token = response.usage.output_tokens
+
+        if (self.model == "gpt-5"):
+            input_cost = input_token * 0.00000125
+            output_cost = output_token * 0.00001
+        elif (self.model == "gpt-5-mini"):
+            input_cost = input_token * 0.00000025
+            output_cost = output_token * 0.000002
+        elif (self.model == "gpt-5-nano"):
+            input_cost = input_token * 0.00000005
+            output_cost = output_token * 0.0000004
+        else:
+            raise Exception(f"Model {self.model} not supported")
+        return input_cost + output_cost
     
-    def generate_code(self, description: str, language: str = "python") -> str:
-        """Generate code using OpenAI."""
-        prompt = f"""Generate {language} code for the following description:
-
-{description}
-
-Requirements:
-- Write clean, well-documented code
-- Include docstrings/comments where appropriate  
-- Follow best practices for {language}
-- Return only the code, no additional explanation
-
-Code:"""
         
-        messages = [
-            {"role": "system", "content": "You are an expert programmer. Generate clean, production-ready code."},
-            {"role": "user", "content": prompt}
-        ]
+    def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+       
+        response = self._query(messages, **kwargs)
+        self.n_calls += 1
+        self.cost += self.cost_calculator(response)
         
-        return self.chat_completion(messages, max_tokens=1500)
+        return {
+            "content": response.output_text or "", 
+        } 
+   
+    def get_template_vars(self) -> dict[str, Any]:
+        return {"n_model_calls": self.n_calls, "model_cost": self.cost}
     
-    def analyze_code(self, code: str, file_path: str = "") -> str:
-        """Analyze code using OpenAI."""
-        prompt = f"""Analyze the following code{f' from {file_path}' if file_path else ''}:
-
-```
-{code}
-```
-
-Provide analysis including:
-- Code structure and organization
-- Potential issues or bugs
-- Suggestions for improvement
-- Code quality assessment
-- Performance considerations
-
-Analysis:"""
-        
-        messages = [
-            {"role": "system", "content": "You are an expert code reviewer. Provide detailed, constructive analysis."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        return self.chat_completion(messages, max_tokens=1000)
-    
-    def chat_response(self, user_input: str, context: str = "") -> str:
-        """Generate chat response using OpenAI."""
-        system_prompt = """You are a helpful coding assistant. You can:
-- Help with coding questions and problems
-- Explain code concepts
-- Debug issues
-- Suggest improvements
-- Generate code snippets
-
-Be concise but helpful. Focus on practical solutions."""
-
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        if context:
-            messages.append({"role": "system", "content": f"Context: {context}"})
-        
-        messages.append({"role": "user", "content": user_input})
-        
-        return self.chat_completion(messages)

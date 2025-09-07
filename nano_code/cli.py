@@ -1,81 +1,56 @@
 """Main CLI entry point for nano-code agent."""
 
-import click
+import typer
+import yaml
+from pathlib import Path
+from typing import Any
+import traceback
 from rich.console import Console
-from rich.panel import Panel
-from nano_code.agent import CodingAgent
+from chat_agent import ChatAgent
+from local import LocalEnvironment
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.shortcuts import PromptSession
 
-console = Console()
+console = Console(highlight=False)
+app = typer.Typer(rich_markup_mode="rich")
 
+# Create a simple history file in the current directory
+prompt_session = PromptSession(history=FileHistory("nano_code_history.txt"))
 
-@click.group()
-@click.version_option()
-def main():
-    """A simple coding agent CLI for analyzing and generating code."""
-    pass
-
-
-@main.command()
-@click.argument('file_path', type=click.Path(exists=True))
-def analyze(file_path):
-    """Analyze a code file and provide insights."""
-    agent = CodingAgent()
+@app.command(help="Run the nano-code agent")
+def main(
+    task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=True),
+) -> Any:
     
+    config = yaml.safe_load(Path("nano_code/default.yaml").read_text())
+
+    if not task:
+        console.print("[bold yellow]What do you want to do?")
+        task = prompt_session.prompt(
+            "",
+            multiline=True,
+            bottom_toolbar=HTML(
+                "Submit task: <b fg='yellow' bg='black'>Esc+Enter</b> | "
+                "Navigate history: <b fg='yellow' bg='black'>Arrow Up/Down</b> | "
+                "Search history: <b fg='yellow' bg='black'>Ctrl+R</b>"
+            ),
+        )
+        console.print("[bold green]Got that, thanks![/bold green]")
+
+    env = LocalEnvironment(**config.get("env", {}))
+    agent = ChatAgent(env, **config.get("agent", {}))
+
+    exit_status, result, extra_info = None, None, None
     try:
-        result = agent.analyze_file(file_path)
-        console.print(Panel(result, title=f"Analysis of {file_path}", border_style="blue"))
+        exit_status, result = agent.run(task)  
     except Exception as e:
-        console.print(f"[red]Error analyzing file: {e}[/red]")
+        print(f"Error running agent: {e}", exc_info=True)
+        exit_status, result = type(e).__name__, str(e)
+        extra_info = {"traceback": traceback.format_exc()}
+    finally:
+        print(exit_status, result, extra_info)
+    return agent
 
-
-@main.command()
-@click.option('--language', '-l', default='python', help='Programming language')
-@click.option('--output', '-o', help='Output file path')
-@click.argument('description')
-def generate(description, language, output):
-    """Generate code based on a description."""
-    agent = CodingAgent()
-    
-    try:
-        code = agent.generate_code(description, language)
-        
-        if output:
-            with open(output, 'w') as f:
-                f.write(code)
-            console.print(f"[green]Code generated and saved to {output}[/green]")
-        else:
-            console.print(Panel(code, title=f"Generated {language} code", border_style="green"))
-    except Exception as e:
-        console.print(f"[red]Error generating code: {e}[/red]")
-
-
-@main.command()
-def chat():
-    """Start an interactive chat session with the coding agent."""
-    agent = CodingAgent()
-    console.print(Panel("Welcome to nano-code interactive mode! Type 'exit' to quit.", 
-                       title="Nano Code Agent", border_style="cyan"))
-    
-    while True:
-        try:
-            user_input = input("\n🤖 > ")
-            
-            if user_input.lower() in ['exit', 'quit', 'bye']:
-                console.print("[yellow]Goodbye![/yellow]")
-                break
-                
-            if not user_input.strip():
-                continue
-                
-            response = agent.chat(user_input)
-            console.print(f"[cyan]{response}[/cyan]")
-            
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Goodbye![/yellow]")
-            break
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    app()
