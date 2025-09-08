@@ -8,19 +8,23 @@ import traceback
 from rich.console import Console
 from nano_code.chat_agent import ChatAgent
 from nano_code.local import LocalEnvironment
+from nano_code import global_config_dir
+from nano_code.utils.save import save_traj
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import PromptSession
 
+DEFAULT_OUTPUT = global_config_dir / "last_nano_code_run.traj.json"
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 
 # Create a simple history file in the current directory
-prompt_session = PromptSession(history=FileHistory("nano_code_history.txt"))
+prompt_session = PromptSession(history=FileHistory(global_config_dir / "nano_code_task_history.txt"))
 
 @app.command(help="Run the nano-code agent")
 def main(
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=True),
+    output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
 ) -> Any:
     
     config_path = Path(__file__).parent / "default.yaml"
@@ -50,7 +54,8 @@ def main(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
-        print(exit_status, result, extra_info)
+        if output:
+            save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)
     return agent
 
 if __name__ == "__main__":

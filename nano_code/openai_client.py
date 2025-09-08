@@ -24,8 +24,11 @@ class OpenAIClient:
         
         self.client = OpenAI(api_key=self.api_key)
         self.model = "gpt-5"  # Default model
+        self.config = {
+            "model": self.model,
+        }
     
-    def _query(self, messages: list[dict[str, str]], max_tokens: int = 1000, **kwargs):
+    def _query(self, messages: list[dict[str, str]], max_tokens: int = 10000, **kwargs):
         try:
             return self.client.responses.create(
                 model=self.model,
@@ -64,5 +67,5 @@ class OpenAIClient:
         } 
    
     def get_template_vars(self) -> dict[str, Any]:
-        return {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return {"n_model_calls": self.n_calls, "model_cost": self.cost, "model": self.model}
     
